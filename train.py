@@ -380,6 +380,10 @@ def main():
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
         checkpoint_path=args.initial_checkpoint)
+    
+    if args.log_wandb and has_wandb:
+        wandb.watch(model, log='gradients', log_graph=True)
+    
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
@@ -740,6 +744,13 @@ def train_one_epoch(
                         rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
                         lr=lr,
                         data_time=data_time_m))
+                if has_wandb:
+                    wandb.log({
+                        'train/loss': losses_m.val, 
+                        'train/fps': input.size(0) * args.world_size / batch_time_m.val,
+                        'lr': lr, 
+                        'batch': batch_idx
+                    })
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(
@@ -822,6 +833,12 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
                     'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
                         loss=losses_m, top1=top1_m, top5=top5_m))
+                if has_wandb:
+                    wandb.log({
+                        'val/loss': losses_m.val, 
+                        'val/fps': input.size(0) * args.world_size / batch_time_m.val,
+                        'batch': batch_idx
+                    })
 
     metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
 
