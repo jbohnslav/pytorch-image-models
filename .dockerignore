@@ -1,0 +1,8 @@
+.git
+.gitignore
+.ipynb_checkpoints
+Dockerfile*
+docker-compose*
+.vscode
+wandb
+output
