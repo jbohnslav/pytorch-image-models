@@ -323,8 +323,8 @@ def main():
     args, args_text = _parse_args()
     
     if args.log_wandb:
-        if has_wandb:
-            wandb.init(project=args.experiment, config=args)
+        if has_wandb and args.local_rank == 0:
+            wandb.init(project="pytorch-image-models", config=args, resume=args.resume, id=args.resume)
         else: 
             _logger.warning("You've requested to log metrics to wandb but package not found. "
                             "Metrics not being logged to wandb, try `pip install wandb`")
@@ -383,7 +383,7 @@ def main():
         scriptable=args.torchscript,
         checkpoint_path=args.initial_checkpoint)
     
-    if args.log_wandb and has_wandb:
+    if args.log_wandb and has_wandb and args.local_rank == 0:
         wandb.watch(model, log='gradients', log_graph=True)
     
     if args.num_classes is None:
@@ -429,7 +429,11 @@ def main():
         assert not use_amp == 'apex', 'Cannot use APEX AMP with torchscripted model'
         assert not args.sync_bn, 'Cannot use SyncBatchNorm with torchscripted model'
         model = torch.jit.script(model)
-
+    # FROM DEIT!
+    linear_scaled_lr = args.lr * args.batch_size * args.world_size / 512.0
+    _logger.info(f'desired LR: {args.lr} batch size: {args.batch_size} world size: {args.world_size}')
+    _logger.info(f'linear scaled LR according to DEIT formula: {linear_scaled_lr}')
+    args.lr = linear_scaled_lr
     optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
 
     # setup automatic mixed-precision (AMP) loss scaling and op casting
@@ -452,8 +456,16 @@ def main():
     # optionally resume from a checkpoint
     resume_epoch = None
     if args.resume:
+        if has_wandb:
+            entity = wandb.api.settings('entity')
+            if entity is None:
+                entity = wandb.api.default_entity
+            wandb_obj = wandb.restore('last.pth.tar', run_path=f'{args.resume}')
+            checkpoint_path = wandb_obj.name
+        else:
+            checkpoint_path = args.resume
         resume_epoch = resume_checkpoint(
-            model, args.resume,
+            model, checkpoint_path,
             optimizer=None if args.no_resume_opt else optimizer,
             loss_scaler=None if args.no_resume_opt else loss_scaler,
             log_info=args.local_rank == 0)
@@ -465,7 +477,7 @@ def main():
         model_ema = ModelEmaV2(
             model, decay=args.model_ema_decay, device='cpu' if args.model_ema_force_cpu else None)
         if args.resume:
-            load_checkpoint(model_ema.module, args.resume, use_ema=True)
+            load_checkpoint(model_ema.module, checkpoint_path, use_ema=True)
 
     # setup distributed training
     if args.distributed:
@@ -611,6 +623,8 @@ def main():
                 str(data_config['input_size'][-1])
             ])
         output_dir = get_outdir(args.output if args.output else './output/train', exp_name)
+        if has_wandb and args.log_wandb:
+            output_dir = wandb.run.dir
         decreasing = True if eval_metric == 'loss' else False
         saver = CheckpointSaver(
             model=model, optimizer=optimizer, args=args, model_ema=model_ema, amp_scaler=loss_scaler,
@@ -835,7 +849,8 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
                     'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
                         loss=losses_m, top1=top1_m, top5=top5_m))
-                if has_wandb:
+                
+                if args.log_wandb and has_wandb:
                     wandb.log({
                         'val/loss': losses_m.val, 
                         'val/fps': input.size(0) * args.world_size / batch_time_m.val,
